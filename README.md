@@ -1,0 +1,1 @@
+Framey is an AI-powered video editing agent that turns your raw footage into viral-ready short clips — automatically styled, captioned, and cut — in minutes.
