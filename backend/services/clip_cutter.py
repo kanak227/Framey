@@ -50,13 +50,14 @@ def cut_clips(
         duration = round(end - start, 2)
         reason = moment.get("reason", "")
         
-        # FFmpeg stream copy command
+        # FFmpeg precise re-encoding command
         cmd = [
             "ffmpeg", "-y",
-            "-i", video_path,
             "-ss", str(start),
-            "-to", str(end),
-            "-c", "copy",
+            "-i", video_path,
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-c:a", "aac",
             output_path
         ]
         

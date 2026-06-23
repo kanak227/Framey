@@ -44,3 +44,19 @@ def extract_audio(video_path: str) -> str:
         raise RuntimeError(error_msg) from e
         
     return os.path.abspath(output_path)
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python3 audio_extractor.py <path_to_video>")
+        sys.exit(1)
+        
+    video = sys.argv[1]
+    print(f"Extracting audio from: {video}")
+    try:
+        out_path = extract_audio(video)
+        print(f"✓ Success! Audio extracted to: {out_path}")
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        sys.exit(1)
+

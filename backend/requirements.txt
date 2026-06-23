@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+pydub
+faster-whisper
+groq
+celery
+redis
+python-dotenv

@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from workers.video_pipeline import process_video, job_statuses
 
 def main():
-    video_path = "temp/sample.mp4"
+    video_path = "sample.mp4" if os.path.exists("sample.mp4") else "temp/sample.mp4"
     if not os.path.exists(video_path):
         print(f"Error: sample.mp4 not found at {video_path}")
         sys.exit(1)

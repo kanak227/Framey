@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from groq import Groq
 from dotenv import load_dotenv
@@ -56,35 +57,45 @@ def parse_json_response(response_text: str) -> dict:
 
 def grade_block(block: dict) -> dict | None:
     """
-    Grades a single text block using Groq API and returns it if the score is >= 6.
+    Grades a single text block using Groq API with exponential backoff retries.
+    Returns the graded block if the score is >= 6.
     """
-    try:
-        client = get_groq_client()
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Grade this transcript block:\n\n{block['text']}"}
-            ],
-            model="llama-3.3-70b-versatile",
-            response_format={"type": "json_object"}
-        )
-        result_text = chat_completion.choices[0].message.content
-        result = parse_json_response(result_text)
-        
-        score = int(result.get("score", 0))
-        reason = result.get("reason", "")
-        
-        if score >= 6:
-            return {
-                "start": block["start"],
-                "end": block["end"],
-                "score": score,
-                "text": block["text"],
-                "reason": reason,
-                "words": block["words"]
-            }
-    except Exception as e:
-        print(f"Error grading block {block['start']}-{block['end']}: {e}", file=sys.stderr)
+    max_retries = 3
+    base_delay = 2.0
+    
+    for attempt in range(max_retries):
+        try:
+            client = get_groq_client()
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Grade this transcript block:\n\n{block['text']}"}
+                ],
+                model="llama-3.3-70b-versatile",
+                response_format={"type": "json_object"}
+            )
+            result_text = chat_completion.choices[0].message.content
+            result = parse_json_response(result_text)
+            
+            score = int(result.get("score", 0))
+            reason = result.get("reason", "")
+            
+            if score >= 6:
+                return {
+                    "start": block["start"],
+                    "end": block["end"],
+                    "score": score,
+                    "text": block["text"],
+                    "reason": reason,
+                    "words": block["words"]
+                }
+            return None
+        except Exception as e:
+            print(f"Error grading block {block['start']}-{block['end']} (Attempt {attempt+1}/{max_retries}): {e}", file=sys.stderr)
+            if attempt < max_retries - 1:
+                sleep_time = base_delay * (2 ** attempt)
+                print(f"Retrying in {sleep_time:.2f} seconds...", file=sys.stderr)
+                time.sleep(sleep_time)
     return None
 
 def grade_chunks(words: list[dict]) -> list[dict]:

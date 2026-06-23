@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from groq import Groq
 from dotenv import load_dotenv
@@ -57,58 +58,67 @@ def parse_json_response(response_text: str) -> dict:
 
 def find_moment_in_block(block: dict) -> dict | None:
     """
-    Finds the best moment in a single block using Groq API and validates the timestamps.
+    Finds the best moment in a single block using Groq API with exponential backoff retries.
+    Validates and adjusts the timestamps returned by the API.
     """
-    try:
-        client = get_groq_client()
-        
-        # Prepare the list of words with timestamps as context
-        words_context = [
-            {"word": w["word"], "start": w["start"], "end": w["end"]}
-            for w in block.get("words", [])
-        ]
-        
-        user_message = (
-            f"Transcript Block (from {block['start']}s to {block['end']}s):\n"
-            f"\"{block['text']}\"\n\n"
-            f"Word Timestamps:\n"
-            f"{json.dumps(words_context, indent=2)}\n\n"
-            f"Identify the best standalone 30-90 second moment inside this block."
-        )
-        
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message}
-            ],
-            model="llama-3.3-70b-versatile",
-            response_format={"type": "json_object"}
-        )
-        
-        result_text = chat_completion.choices[0].message.content
-        result = parse_json_response(result_text)
-        
-        start = float(result.get("start", block["start"]))
-        end = float(result.get("end", block["end"]))
-        reason = result.get("reason", "")
-        
-        # Validation/Correction step to prevent downstream FFmpeg errors
-        if start < block["start"]:
-            start = block["start"]
+    max_retries = 3
+    base_delay = 2.0
+    
+    for attempt in range(max_retries):
+        try:
+            client = get_groq_client()
             
-        if end > block["end"]:
-            end = block["end"]
+            # Prepare the list of words with timestamps as context
+            words_context = [
+                {"word": w["word"], "start": w["start"], "end": w["end"]}
+                for w in block.get("words", [])
+            ]
             
-        if (end - start) > 90.0:
-            end = start + 90.0
+            user_message = (
+                f"Transcript Block (from {block['start']}s to {block['end']}s):\n"
+                f"\"{block['text']}\"\n\n"
+                f"Word Timestamps:\n"
+                f"{json.dumps(words_context, indent=2)}\n\n"
+                f"Identify the best standalone 30-90 second moment inside this block."
+            )
             
-        return {
-            "start": start,
-            "end": end,
-            "reason": reason
-        }
-    except Exception as e:
-        print(f"Error finding moment in block {block['start']}-{block['end']}: {e}", file=sys.stderr)
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message}
+                ],
+                model="llama-3.3-70b-versatile",
+                response_format={"type": "json_object"}
+            )
+            
+            result_text = chat_completion.choices[0].message.content
+            result = parse_json_response(result_text)
+            
+            start = float(result.get("start", block["start"]))
+            end = float(result.get("end", block["end"]))
+            reason = result.get("reason", "")
+            
+            # Validation/Correction step to prevent downstream FFmpeg errors
+            if start < block["start"]:
+                start = block["start"]
+                
+            if end > block["end"]:
+                end = block["end"]
+                
+            if (end - start) > 90.0:
+                end = start + 90.0
+                
+            return {
+                "start": start,
+                "end": end,
+                "reason": reason
+            }
+        except Exception as e:
+            print(f"Error finding moment in block {block['start']}-{block['end']} (Attempt {attempt+1}/{max_retries}): {e}", file=sys.stderr)
+            if attempt < max_retries - 1:
+                sleep_time = base_delay * (2 ** attempt)
+                print(f"Retrying in {sleep_time:.2f} seconds...", file=sys.stderr)
+                time.sleep(sleep_time)
     return None
 
 def find_moments(graded_blocks: list[dict]) -> list[dict]:
