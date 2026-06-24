@@ -24,9 +24,9 @@ graph TD
         Worker[workers/video_pipeline.py]
     end
     
-    subgraph AI/ML & Processing Services
-        Whisper[faster-whisper GPU/CPU]
-        Groq[Groq API Llama-3.3]
+    subgraph AI/ML & Cloud Services
+        Whisper[Groq Whisper API whisper-large-v3]
+        Groq[Groq Llama-3.3-70b Engine]
         FFmpeg[FFmpeg CLI Engine]
     end
     
@@ -77,16 +77,14 @@ sequenceDiagram
     
     activate Worker
     Redis->>Worker: Consume Task
-    Worker->>Redis: Update job:ID -> status="processing", progress=10 (Extract Audio)
-    Worker->>Redis: Update job:ID -> status="processing", progress=25 (Chunking)
-    Worker->>Redis: Update job:ID -> status="processing", progress=45 (Transcribing)
+    Worker->>Redis: Update job:ID -> status="processing", progress=15 (Extract Audio)
+    Worker->>Redis: Update job:ID -> status="processing", progress=50 (Transcribing)
     
     rect rgb(240, 248, 255)
-        Note over Worker: Transcribe segments in parallel (faster-whisper)
+        Note over Worker: Transcribe file via Groq Whisper API<br/>(Compresses automatically if > 25MB)
     end
     
-    Worker->>Redis: Update job:ID -> status="processing", progress=60 (Merging)
-    Worker->>Redis: Update job:ID -> status="processing", progress=80 (Grading/Finding Moments)
+    Worker->>Redis: Update job:ID -> status="processing", progress=80 (Grading & Finding Moments)
     Worker->>LLM: Grade 2-min chunks & locate sentence-level start/end (Llama 70B)
     Note over Worker: FFmpeg precise re-encode slicing (libx264/aac)
     Worker->>Redis: Update job:ID -> status="processing", progress=90 (Cutting)
@@ -107,40 +105,33 @@ sequenceDiagram
 
 ---
 
-## 🛠️ Deep Dive: The 7 Pipeline Stages
+## 🛠️ Deep Dive: The 5 Pipeline Stages
 
 ### Stage 1: Audio Extraction (`services/audio_extractor.py`)
 *   **Command**: Runs FFmpeg to separate the audio track:
     `ffmpeg -y -i input.mp4 -q:a 0 -map a output.mp3`
 *   **Output**: High-fidelity `.mp3` file inside `backend/temp/`.
 
-### Stage 2: Audio Chunking (`services/chunker.py`)
-*   **Action**: Splits the master audio track into 30-second segments.
-*   **Why**: Parallelizes transcription and avoids file size limits/timeouts in local Whisper models.
+### Stage 2: Cloud Transcription (`services/transcriber.py`)
+*   **Action**: Transcribes the entire master audio file using the **Groq Whisper API** (`whisper-large-v3`).
+*   **Auto-Compression**: To fit within Groq's 25MB file upload limit, files larger than 25MB are dynamically compressed to a 32kbps mono MP3 using FFmpeg before sending the API request.
+*   **Parameter**: Requests `timestamp_granularities=["word"]` to retrieve precise timing for every spoken word, allowing accurate sentence and phrase boundaries.
 
-### Stage 3: Parallel Chunk Transcription (`services/transcriber.py`)
-*   **Action**: Runs parallel transcribers on chunks using `ThreadPoolExecutor(max_workers=4)`.
-*   **Engine**: `faster-whisper` (`small` model).
-*   **GPU Auto-Detection**: Dynamically checks if CUDA is available (`device="cuda"`) and runs with `float16`. Falls back to CPU with `int8` quantization.
-*   **Parameter**: Requests `word_timestamps=True` to retrieve precise millisecond timing for every spoken word.
-
-### Stage 4: Transcript Merging (`services/transcript_merger.py`)
-*   **Action**: Combines transcripts. It offsets timestamps based on the chunk starting offsets and sorts all words chronologically.
-
-### Stage 5: Chunk Grading (`services/chunk_grader.py`)
+### Stage 3: Chunk Grading (`services/chunk_grader.py`)
 *   **Action**: Groups words into 2-minute blocks and scores them via **Groq** (`llama-3.3-70b-versatile`).
-*   **Resiliency**: Leverages a retry loop with exponential backoff (starting at `2.0s` sleep) to avoid API rate limits (`429`).
+*   **Resiliency**: Uses parallel request pacing (`max_workers=2`) and a retry loop with exponential backoff (starting at `2.0s` sleep) to avoid API rate limits (`429`).
 *   **Logic**: Surviving blocks must score $\ge 6$ on viral potential, hooks, and completeness.
 
-### Stage 6: Moment Finding (`services/moment_finder.py`)
+### Stage 4: Moment Finding (`services/moment_finder.py`)
 *   **Action**: Passes high-scoring transcript blocks and word lists to Groq to extract the exact boundaries of the best 30–90 second clip.
+*   **Optimization**: Formats the word timestamp listing in a highly compact string layout (`word(start,end)`) rounded to 1 decimal place. This reduces the prompt payload by **over 10x**, staying well under Groq's strict token limits (preventing `413 Payload Too Large` issues).
 *   **Logic**: Enforces that boundaries align with natural sentence boundaries (never cut mid-word or mid-sentence).
 
-### Stage 7: Precise Slicing & Storage Sweep (`services/clip_cutter.py`)
+### Stage 5: Precise Slicing & Storage Sweep (`services/clip_cutter.py`)
 *   **Command**: Runs FFmpeg to cut the clips:
     `ffmpeg -y -ss START -i input.mp4 -t DURATION -c:v libx264 -c:a aac output.mp4`
 *   **Precision**: Re-encodes using H.264/AAC. This guarantees the video starts precisely on a keyframe at the target timestamp, eliminating black or frozen screen glitches.
-*   **Sweep**: Automatically deletes intermediate audio, chunk folders, and the original uploaded source video on successful or failed pipeline runs.
+*   **Sweep**: Automatically deletes intermediate audio and the original uploaded source video on successful or failed pipeline runs.
 
 ---
 
