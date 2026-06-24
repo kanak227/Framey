@@ -55,7 +55,6 @@ Framey/
 │   │   └── video_pipeline.py   # Main pipeline orchestrator/Celery task
 │   └── temp/                   # Auto-generated workspace for cuts
 ├── frontend/                   # Client workspace placeholder
-├── storage/                    # Output directory for video storage
 ├── docker-compose.yml          # Container configuration (FastAPI, Redis, Celery Worker)
 ├── .env                        # Environment configurations (Groq API keys)
 └── README.md                   # Core Documentation
