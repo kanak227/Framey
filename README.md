@@ -54,8 +54,13 @@ Framey/
 │   │   ├── celery_app.py       # Celery configuration
 │   │   └── video_pipeline.py   # Main pipeline orchestrator/Celery task
 │   └── temp/                   # Auto-generated workspace for cuts
-├── frontend/                   # Client workspace placeholder
-├── docker-compose.yml          # Container configuration (FastAPI, Redis, Celery Worker)
+├── frontend/
+│   ├── src/                    # React frontend source files
+│   │   ├── App.jsx             # Main dashboard logic and SSE streams
+│   │   └── App.css             # Glassmorphic, dark theme UI styles
+│   ├── index.html              # HTML shell entry point
+│   └── Dockerfile              # Container building Vite server
+├── docker-compose.yml          # Container configuration (React, FastAPI, Redis, Worker)
 ├── .env                        # Environment configurations (Groq API keys)
 └── README.md                   # Core Documentation
 ```
@@ -77,8 +82,9 @@ Make sure you have [Docker](https://www.docker.com/) and Docker Compose installe
    ```
 
 This launches:
-*   **Redis** on port `6379`
+*   **React frontend** on port `3000`
 *   **FastAPI backend** on port `8000`
+*   **Redis** on port `6379`
 *   **Celery worker** (listens to tasks)
 
 ### Option 2: Local Installation (Manual)

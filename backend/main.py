@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from api.upload import router as upload_router
 from api.jobs import router as jobs_router
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(
     title="Framey Video-to-Shorts API",
@@ -23,6 +24,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount temp directory to serve generated video clips
+# Note: uses /app/temp inside Docker, falls back to local relative path if running bare
+temp_dir = "/app/temp" if os.path.exists("/app/temp") else os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+os.makedirs(temp_dir, exist_ok=True)
+app.mount("/temp", StaticFiles(directory=temp_dir), name="temp")
 
 # Register routers
 app.include_router(upload_router, tags=["Upload"])

@@ -10,7 +10,7 @@ Framey is built on a distributed, asynchronous microservice architecture designe
 
 ```mermaid
 graph TD
-    Client[Client UI / API Client]
+    Client[React Frontend App port 3000]
     
     subgraph FastAPI Web Server
         API[api/upload.py & api/jobs.py]
@@ -43,16 +43,17 @@ graph TD
 
 ## 📦 Docker Container Topology
 
-The application is fully containerized and orchestrated using `docker-compose`. The stack consists of three services:
+The application is fully containerized and orchestrated using `docker-compose`. The stack consists of four services:
 
 | Service Name | Base Image | Purpose | Port / Volumes |
 | :--- | :--- | :--- | :--- |
+| **`frontend`** | `node:20-slim` | Serves the Vite React single page application. | Port `3000`<br>Volume `/app` |
 | **`redis`** | `redis:alpine` | Acts as the Celery message broker and holds task status metadata. | Port `6379` |
-| **`backend`** | `python:3.12-slim` | Runs the FastAPI web application (Uvicorn). Exposes upload & tracking endpoints. | Port `8000`<br>Volume `/app/temp` |
-| **`worker`** | `python:3.12-slim` | Runs the Celery daemon executing background video-to-shorts pipeline tasks. | Volume `/app/temp` |
+| **`backend`** | `python:3.12-slim` | Runs the FastAPI web application (Uvicorn). Exposes upload, streaming status, and serves clips. | Port `8000`<br>Volume `/app` |
+| **`worker`** | `python:3.12-slim` | Runs the Celery daemon executing background video-to-shorts pipeline tasks. | Volume `/app` |
 
 > [!NOTE]
-> A shared Docker volume named `temp_data` is mounted to `/app/temp` on both `backend` and `worker` containers. This allows the backend to save the uploaded video file, and the worker to access and slice it without needing file transfers.
+> A bind mount of the local directory `./backend` is mounted to `/app` on both `backend` and `worker` containers. This allows both containers to directly read and write to the same host `backend/temp/` folder, synchronizing the processed `.mp4` video clips directly onto the host filesystem for easy developer access.
 
 ---
 
