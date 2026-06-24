@@ -27,7 +27,7 @@ graph TD
    * Files larger than 25MB are dynamically compressed to a 32kbps mono MP3 using FFmpeg before uploading to remain within the Groq API file size limits.
 
 3. **Transcript Grading (`services/chunk_grader.py`)**
-   * Segments the transcript into 2-minute blocks and prompts the Groq API (`llama-3.3-70b-versatile`) to evaluate them. Blocks scoring $\ge 6$ on a scale of 1-10 (relevance, punchiness, hook presence) are selected for clip generation.
+   * Segments the transcript into 2-minute blocks and prompts the Groq API (configurable model, e.g., `llama-3.1-8b-instant`) to evaluate them. Blocks scoring $\ge 6$ on a scale of 1-10 (relevance, punchiness, hook presence) are selected for clip generation.
    * Utilizes sequential request pacing (`max_workers=2`) and backoff retry loops to prevent hitting rate limits (`429`).
 
 4. **Moment Finder (`services/moment_finder.py`)**

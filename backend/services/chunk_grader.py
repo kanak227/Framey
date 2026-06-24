@@ -66,12 +66,13 @@ def grade_block(block: dict) -> dict | None:
     for attempt in range(max_retries):
         try:
             client = get_groq_client()
+            model_name = os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant")
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"Grade this transcript block:\n\n{block['text']}"}
                 ],
-                model="llama-3.3-70b-versatile",
+                model=model_name,
                 response_format={"type": "json_object"}
             )
             result_text = chat_completion.choices[0].message.content

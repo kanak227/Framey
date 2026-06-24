@@ -82,12 +82,13 @@ def find_moment_in_block(block: dict) -> dict | None:
                 f"Identify the best standalone 30-90 second moment inside this block."
             )
             
+            model_name = os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant")
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_message}
                 ],
-                model="llama-3.3-70b-versatile",
+                model=model_name,
                 response_format={"type": "json_object"}
             )
             
