@@ -2,6 +2,7 @@ import os
 import uuid
 import shutil
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from pydantic import BaseModel
 from workers.video_pipeline import process_video_task, update_job_status
 
 router = APIRouter()
@@ -69,6 +70,34 @@ async def upload_video(file: UploadFile = File(...)):
     process_video_task.delay(job_id, temp_file_path)
     
     # Return immediately, don't wait for pipeline
+    return {"job_id": job_id}
+
+
+class UrlUploadRequest(BaseModel):
+    url: str
+
+
+@router.post("/upload-url")
+async def upload_url(request: UrlUploadRequest):
+    url = request.url
+    if not url.startswith("http://") and not url.startswith("https://"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL format. Must start with http:// or https://"
+        )
+        
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+    
+    update_job_status(
+        job_id=job_id,
+        status="pending",
+        step="Initializing download pipeline...",
+        progress=0
+    )
+    
+    # Pass the URL directly. process_video_task will download it inside the worker.
+    process_video_task.delay(job_id, url)
+    
     return {"job_id": job_id}
 
 

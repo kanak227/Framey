@@ -7,6 +7,8 @@ function App() {
   const [view, setView] = useState('upload'); // 'upload' | 'progress' | 'results'
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadType, setUploadType] = useState('file'); // 'file' | 'url'
+  const [youtubeUrl, setYoutubeUrl] = useState('');
   
   // Job & Progress states
   const [jobId, setJobId] = useState(null);
@@ -147,6 +149,43 @@ function App() {
     fileInputRef.current.click();
   };
 
+  const handleUploadUrl = async (e) => {
+    e.preventDefault();
+    if (!youtubeUrl) return;
+
+    setUploading(true);
+    setError(null);
+    setProgress(0);
+    setStep('Initializing download pipeline...');
+
+    try {
+      const response = await fetch(`${API_BASE}/upload-url`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: youtubeUrl }),
+      });
+
+      if (!response.ok) {
+        const errDetail = await response.json();
+        throw new Error(errDetail.detail || 'Failed to submit URL');
+      }
+
+      const result = await response.json();
+      const newJobId = result.job_id;
+      
+      setJobId(newJobId);
+      setView('progress');
+      startProgressStream(newJobId);
+    } catch (err) {
+      console.error('URL submit error:', err);
+      setError(err.message || 'Failed to connect to the backend server.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleReset = () => {
     setView('upload');
     setJobId(null);
@@ -154,6 +193,7 @@ function App() {
     setStep('');
     setClips([]);
     setError(null);
+    setYoutubeUrl('');
   };
 
   // SVG circular loader variables
@@ -199,33 +239,79 @@ function App() {
               </p>
             </div>
 
-            <div 
-              className={`upload-container ${dragActive ? 'drag-active' : ''}`}
-              onDragEnter={handleDrag}
-              onDragOver={handleDrag}
-              onDragLeave={handleDrag}
-              onDrop={handleDrop}
-              onClick={triggerFileInput}
-            >
-              <input 
-                type="file" 
-                ref={fileInputRef}
-                onChange={handleFileInput}
-                className="file-input"
-                accept=".mp4,.mov,.mkv,.avi,.webm"
+            <div className="upload-tabs">
+              <button 
+                type="button"
+                className={`tab-btn ${uploadType === 'file' ? 'active' : ''}`}
+                onClick={() => setUploadType('file')}
                 disabled={uploading}
-              />
-              <div className="upload-icon-wrapper">
-                {uploading ? '⏳' : '📥'}
-              </div>
-              <p className="upload-text">
-                {uploading ? 'Processing File...' : 'Drag & drop your video here'}
-              </p>
-              <p className="upload-subtext">Supports MP4, MOV, MKV, AVI, and WEBM (Max 500MB)</p>
-              <button className="btn-upload" disabled={uploading}>
-                {uploading ? 'Uploading...' : 'Choose File ->'}
+              >
+                📁 Upload File
+              </button>
+              <button 
+                type="button"
+                className={`tab-btn ${uploadType === 'url' ? 'active' : ''}`}
+                onClick={() => setUploadType('url')}
+                disabled={uploading}
+              >
+                🔗 Import via Link
               </button>
             </div>
+
+            {uploadType === 'file' ? (
+              <div 
+                className={`upload-container ${dragActive ? 'drag-active' : ''}`}
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+                onClick={triggerFileInput}
+              >
+                <input 
+                  type="file" 
+                  ref={fileInputRef}
+                  onChange={handleFileInput}
+                  className="file-input"
+                  accept=".mp4,.mov,.mkv,.avi,.webm"
+                  disabled={uploading}
+                />
+                <div className="upload-icon-wrapper">
+                  {uploading ? '⏳' : '📥'}
+                </div>
+                <p className="upload-text">
+                  {uploading ? 'Processing File...' : 'Drag & drop your video here'}
+                </p>
+                <p className="upload-subtext">Supports MP4, MOV, MKV, AVI, and WEBM (Max 500MB)</p>
+                <button type="button" className="btn-upload" disabled={uploading}>
+                  {uploading ? 'Uploading...' : 'Choose File ->'}
+                </button>
+              </div>
+            ) : (
+              <div className="url-container">
+                <form className="url-form" onSubmit={handleUploadUrl}>
+                  <div className="upload-icon-wrapper">
+                    {uploading ? '⏳' : '🔗'}
+                  </div>
+                  <p className="upload-text">
+                    {uploading ? 'Processing Link...' : 'Import from YouTube or Web URL'}
+                  </p>
+                  <div className="url-input-wrapper">
+                    <input
+                      type="url"
+                      className="url-input"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={youtubeUrl}
+                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      required
+                      disabled={uploading}
+                    />
+                  </div>
+                  <button type="submit" className="btn-process" disabled={uploading || !youtubeUrl}>
+                    {uploading ? 'Submitting...' : 'Process Video Link ->'}
+                  </button>
+                </form>
+              </div>
+            )}
 
             {error && (
               <div style={{ marginTop: '1.5rem', color: '#ef4444', fontWeight: '500', fontSize: '0.95rem' }}>

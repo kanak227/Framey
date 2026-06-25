@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import redis
+import subprocess
 
 # Ensure the backend directory is in the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,6 +62,47 @@ def process_video_task(job_id: str, video_path: str) -> list[dict]:
         list[dict]: List of output clips metadata.
     """
     try:
+        # Check if video_path is a URL and download it first
+        if video_path.startswith("http://") or video_path.startswith("https://"):
+            update_job_status(job_id, "processing", "Downloading video from URL...", 5)
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            temp_dir = os.path.join(backend_dir, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            downloaded_file = os.path.join(temp_dir, f"{job_id}.mp4")
+            cmd = [
+                "yt-dlp",
+                "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "--merge-output-format", "mp4",
+                "-o", downloaded_file,
+                video_path
+            ]
+            
+            print(f"Running download command: {' '.join(cmd)}")
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                print(f"yt-dlp standard download failed: {res.stderr}")
+                # Fallback to simple best format
+                cmd_fallback = [
+                    "yt-dlp",
+                    "-f", "best",
+                    "-o", downloaded_file,
+                    video_path
+                ]
+                print(f"Running fallback download command: {' '.join(cmd_fallback)}")
+                res_fallback = subprocess.run(cmd_fallback, capture_output=True, text=True)
+                if res_fallback.returncode != 0:
+                    raise Exception(f"Failed to download video from URL: {res_fallback.stderr or res.stderr}")
+            
+            if not os.path.exists(downloaded_file):
+                matching_files = [f for f in os.listdir(temp_dir) if f.startswith(job_id)]
+                if matching_files:
+                    downloaded_file = os.path.join(temp_dir, matching_files[0])
+                else:
+                    raise Exception("Video downloaded but output file could not be found.")
+            
+            video_path = downloaded_file
+
         # Step 1: Audio Extraction
         update_job_status(job_id, "processing", "Extracting audio...", 15)
         audio_path = extract_audio(video_path)
