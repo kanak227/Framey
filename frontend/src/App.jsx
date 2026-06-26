@@ -1,9 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import './App.css';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+
+// Initialize Supabase client
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 function App() {
+  // Authentication states
+  const [session, setSession] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState(null);
+
+  // Main UI states
   const [view, setView] = useState('upload'); // 'upload' | 'progress' | 'results'
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -19,65 +34,181 @@ function App() {
   // Results states
   const [clips, setClips] = useState([]);
   const [selectedClipIdx, setSelectedClipIdx] = useState(0);
+  const [downloading, setDownloading] = useState(false);
   
-  const eventSourceRef = useRef(null);
+  // Historical jobs
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const realtimeChannelRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Clean up SSE connection on unmount
+  // 1. Subscribe to Auth changes
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) {
+        fetchHistory(session.user.id);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session) {
+        fetchHistory(session.user.id);
+      } else {
+        setHistory([]);
+      }
+    });
+
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
+      subscription.unsubscribe();
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current.unsubscribe();
       }
     };
   }, []);
 
-  // Listen to SSE progress stream
-  const startProgressStream = (id) => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
+  // 2. Fetch user's historical jobs
+  const fetchHistory = async (userId) => {
+    if (!userId) return;
+    setHistoryLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('jobs')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setHistory(data || []);
+    } catch (err) {
+      console.error('Error fetching history:', err);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  // 3. User Authentication handlers
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) return;
+
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      if (authMode === 'login') {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+        alert('Check your email for confirmation link if email verification is enabled!');
+      }
+    } catch (err) {
+      setAuthError(err.message || 'Auth action failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    handleReset();
+  };
+
+  // 4. Live updates from Supabase Realtime
+  const startProgressSubscription = (id) => {
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.unsubscribe();
     }
 
-    const sseUrl = `${API_BASE}/status/stream/${id}`;
-    const source = new EventSource(sseUrl);
-    eventSourceRef.current = source;
+    setProgress(0);
+    setStep('Initializing pipeline...');
 
-    source.onmessage = (event) => {
+    // Polling fallback in case Supabase Realtime replication is not enabled
+    const pollInterval = setInterval(async () => {
       try {
-        const data = JSON.parse(event.data);
-        
-        if (data.status === 'processing') {
-          setProgress(data.progress || 0);
-          setStep(data.step || 'Processing...');
-        } else if (data.status === 'done') {
-          setProgress(100);
-          setStep('Complete!');
-          setClips(data.clips || []);
-          setSelectedClipIdx(0);
-          setView('results');
-          source.close();
-        } else if (data.status === 'failed') {
-          setError(data.error || 'Pipeline execution failed.');
-          setView('upload');
-          source.close();
+        const response = await fetch(`${API_BASE}/status/${id}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === 'processing') {
+            setProgress(data.progress || 0);
+            setStep(data.step || 'Processing...');
+          } else if (data.status === 'done') {
+            setProgress(100);
+            setStep('Complete!');
+            setClips(data.clips || []);
+            setSelectedClipIdx(0);
+            setView('results');
+            clearInterval(pollInterval);
+            if (session?.user?.id) fetchHistory(session.user.id);
+          } else if (data.status === 'failed') {
+            setError(data.error || 'Pipeline execution failed.');
+            setView('upload');
+            clearInterval(pollInterval);
+            if (session?.user?.id) fetchHistory(session.user.id);
+          }
         }
       } catch (err) {
-        console.error('Error parsing SSE event:', err);
+        console.error('Error polling status:', err);
       }
-    };
+    }, 2000);
 
-    source.onerror = (err) => {
-      console.error('SSE connection error:', err);
-      // Don't immediately crash, but close connection
-      source.close();
+    const channel = supabase
+      .channel(`job-updates-${id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'jobs',
+          filter: `id=eq.${id}`,
+        },
+        (payload) => {
+          const data = payload.new;
+          if (data.status === 'processing') {
+            setProgress(data.progress || 0);
+            setStep(data.step || 'Processing...');
+          } else if (data.status === 'done') {
+            setProgress(100);
+            setStep('Complete!');
+            setClips(data.clips || []);
+            setSelectedClipIdx(0);
+            setView('results');
+            channel.unsubscribe();
+            clearInterval(pollInterval);
+            if (session?.user?.id) fetchHistory(session.user.id);
+          } else if (data.status === 'failed') {
+            setError(data.error || 'Pipeline execution failed.');
+            setView('upload');
+            channel.unsubscribe();
+            clearInterval(pollInterval);
+            if (session?.user?.id) fetchHistory(session.user.id);
+          }
+        }
+      )
+      .subscribe();
+
+    realtimeChannelRef.current = {
+      unsubscribe: () => {
+        channel.unsubscribe();
+        clearInterval(pollInterval);
+      }
     };
   };
 
-  // Upload file API call
+  // 5. Upload video directly to backend API
   const handleUploadFile = async (file) => {
-    if (!file) return;
+    if (!file || !session) return;
     
-    // Validate file type
     const validExtensions = ['.mp4', '.mov', '.mkv', '.avi', '.webm'];
     const fileExtension = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
     if (!validExtensions.includes(fileExtension)) {
@@ -88,31 +219,34 @@ function App() {
     setUploading(true);
     setError(null);
     setProgress(0);
-    setStep('Uploading video...');
-
-    const formData = new FormData();
-    formData.append('file', file);
+    setStep('Uploading video to backend server...');
 
     try {
+      const formData = new FormData();
+      formData.append('file', file);
+
       const response = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`
+        },
         body: formData,
       });
 
       if (!response.ok) {
         const errDetail = await response.json();
-        throw new Error(errDetail.detail || 'Upload failed');
+        throw new Error(errDetail.detail || 'Failed to upload video to backend.');
       }
 
       const result = await response.json();
-      const newJobId = result.job_id;
-      
-      setJobId(newJobId);
+      const finalJobId = result.job_id;
+
+      setJobId(finalJobId);
       setView('progress');
-      startProgressStream(newJobId);
+      startProgressSubscription(finalJobId);
     } catch (err) {
-      console.error('Upload error:', err);
-      setError(err.message || 'Failed to connect to the backend server.');
+      console.error('Upload flow error:', err);
+      setError(err.message || 'Video upload or pipeline initialization failed.');
     } finally {
       setUploading(false);
     }
@@ -149,20 +283,22 @@ function App() {
     fileInputRef.current.click();
   };
 
+  // 6. Submit external YouTube URL
   const handleUploadUrl = async (e) => {
     e.preventDefault();
-    if (!youtubeUrl) return;
+    if (!youtubeUrl || !session) return;
 
     setUploading(true);
     setError(null);
     setProgress(0);
-    setStep('Initializing download pipeline...');
+    setStep('Submitting video link...');
 
     try {
       const response = await fetch(`${API_BASE}/upload-url`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
         },
         body: JSON.stringify({ url: youtubeUrl }),
       });
@@ -177,12 +313,53 @@ function App() {
       
       setJobId(newJobId);
       setView('progress');
-      startProgressStream(newJobId);
+      startProgressSubscription(newJobId);
     } catch (err) {
       console.error('URL submit error:', err);
       setError(err.message || 'Failed to connect to the backend server.');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const loadJobFromHistory = (job) => {
+    if (job.status === 'done') {
+      setJobId(job.id);
+      setClips(job.clips || []);
+      setSelectedClipIdx(0);
+      setView('results');
+    } else if (job.status === 'processing' || job.status === 'pending') {
+      setJobId(job.id);
+      setProgress(job.progress || 0);
+      setStep(job.step || 'Processing...');
+      setView('progress');
+      startProgressSubscription(job.id);
+    } else {
+      alert(`Job status: ${job.status.toUpperCase()}. Error details: ${job.error || 'N/A'}`);
+    }
+  };
+
+  const handleDownloadClip = async (url, start, end) => {
+    if (!url) return;
+    setDownloading(true);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      const filename = `clip_${start.toFixed(1)}s-${end.toFixed(1)}s.mp4`;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error('Failed to download clip via blob, falling back to window.open:', err);
+      window.open(url, '_blank');
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -194,6 +371,7 @@ function App() {
     setClips([]);
     setError(null);
     setYoutubeUrl('');
+    if (session?.user?.id) fetchHistory(session.user.id);
   };
 
   // SVG circular loader variables
@@ -203,6 +381,77 @@ function App() {
   const circumference = normalizedRadius * 2 * Math.PI;
   const strokeDashoffset = circumference - (progress / 100) * circumference;
 
+  // Render Login / Signup view if unauthenticated
+  if (!session) {
+    return (
+      <div className="app-container" style={{ justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+        <div style={{ maxWidth: '400px', width: '100%', padding: '2rem', background: '#111827', border: '1px solid #1f2937', borderRadius: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', textAlign: 'center' }}>
+          <div className="logo-container" style={{ justifyContent: 'center', marginBottom: '1.5rem' }}>
+            <span className="logo-icon">F</span>
+            <span className="logo-text">Framey</span>
+          </div>
+          <h2 style={{ fontSize: '1.5rem', color: '#fff', marginBottom: '0.5rem' }}>
+            {authMode === 'login' ? 'Welcome Back' : 'Create Account'}
+          </h2>
+          <p style={{ color: '#9ca3af', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
+            {authMode === 'login' ? 'Log in to generate viral video clips' : 'Sign up to start transforming videos'}
+          </p>
+
+          <form onSubmit={handleAuthSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <input
+              type="email"
+              placeholder="Email address"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              style={{ padding: '0.8rem', background: '#1f2937', border: '1px solid #374151', borderRadius: '8px', color: '#fff', fontSize: '0.95rem' }}
+              required
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              style={{ padding: '0.8rem', background: '#1f2937', border: '1px solid #374151', borderRadius: '8px', color: '#fff', fontSize: '0.95rem' }}
+              required
+            />
+
+            {authError && (
+              <p style={{ color: '#ef4444', fontSize: '0.85rem', textAlign: 'left', margin: 0 }}>
+                ❌ {authError}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              style={{ padding: '0.85rem', background: 'linear-gradient(135deg, #6366f1, #a78bfa)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 'bold', fontSize: '1rem', cursor: 'pointer', transition: 'opacity 0.2s' }}
+            >
+              {authLoading ? 'Loading...' : authMode === 'login' ? 'Log In' : 'Sign Up'}
+            </button>
+          </form>
+
+          <div style={{ marginTop: '1.5rem', borderTop: '1px solid #1f2937', paddingTop: '1.2rem', fontSize: '0.9rem', color: '#9ca3af' }}>
+            {authMode === 'login' ? (
+              <p>
+                Don't have an account?{' '}
+                <span onClick={() => setAuthMode('signup')} style={{ color: '#a78bfa', cursor: 'pointer', fontWeight: 'bold' }}>
+                  Sign Up
+                </span>
+              </p>
+            ) : (
+              <p>
+                Already have an account?{' '}
+                <span onClick={() => setAuthMode('login')} style={{ color: '#a78bfa', cursor: 'pointer', fontWeight: 'bold' }}>
+                  Log In
+                </span>
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       {/* HEADER NAVBAR */}
@@ -211,17 +460,18 @@ function App() {
           <span className="logo-icon">F</span>
           <span className="logo-text">Framey</span>
         </div>
-        <a 
-          href="https://github.com" 
-          target="_blank" 
-          rel="noopener noreferrer" 
-          className="github-link"
-        >
-          <svg className="github-icon" viewBox="0 0 24 24">
-            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-          </svg>
-          Star on GitHub
-        </a>
+        
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+          <span style={{ color: '#9ca3af', fontSize: '0.9rem', display: 'none', '@media (min-width: 640px)': { display: 'inline' } }}>
+            👤 {session.user.email}
+          </span>
+          <button 
+            onClick={handleLogout}
+            style={{ padding: '0.5rem 1rem', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#ef4444', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', transition: 'all 0.2s' }}
+          >
+            Log Out
+          </button>
+        </div>
       </header>
 
       {/* MAIN CONTENT PORT */}
@@ -235,7 +485,7 @@ function App() {
                 Turn long videos into <span>viral shorts</span>
               </h1>
               <p className="hero-subtitle">
-                Upload your podcast, interview, or tutorial. Our pipeline extracts, evaluations, and cuts the most engaging standalone moments in seconds.
+                Upload your podcast, interview, or tutorial. Our pipeline extracts, evaluates, and cuts the most engaging standalone moments in seconds.
               </p>
             </div>
 
@@ -319,8 +569,43 @@ function App() {
               </div>
             )}
 
-            <div className="star-banner">
-              <span>Liked the product? A star on github would do the job. 🌟</span>
+            {/* JOB HISTORY LOG INTERFACE */}
+            <div style={{ marginTop: '3rem', width: '100%', maxWidth: '640px', textAlign: 'left' }}>
+              <h3 style={{ fontSize: '1.3rem', color: '#fff', borderBottom: '1px solid #1f2937', paddingBottom: '0.5rem', marginBottom: '1rem', fontFamily: 'var(--font-display)', fontWeight: 700 }}>
+                Your Video History 🎬
+              </h3>
+              
+              {historyLoading ? (
+                <p style={{ color: '#9ca3af', fontSize: '0.95rem' }}>Loading past projects...</p>
+              ) : history.length === 0 ? (
+                <p style={{ color: '#4b5563', fontSize: '0.95rem' }}>No past projects found. Upload a video to see your history here!</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {history.map((job) => (
+                    <div
+                      key={job.id}
+                      onClick={() => loadJobFromHistory(job)}
+                      style={{ padding: '1rem', background: '#111827', border: '1px solid #1f2937', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', transition: 'all 0.2s', ':hover': { borderColor: '#6366f1' } }}
+                      className="history-item-row"
+                    >
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span style={{ fontWeight: 'bold', color: '#fff', fontSize: '0.95rem' }}>Job: {job.id.replace('job_', '')}</span>
+                          <span style={{ fontSize: '0.8rem', padding: '0.15rem 0.5rem', borderRadius: '100px', fontWeight: 'bold', background: job.status === 'done' ? 'rgba(16,185,129,0.1)' : job.status === 'failed' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)', color: job.status === 'done' ? '#10b981' : job.status === 'failed' ? '#ef4444' : '#f59e0b' }}>
+                            {job.status.toUpperCase()}
+                          </span>
+                        </div>
+                        <div style={{ color: '#6b7280', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+                          Created at: {new Date(job.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                      <div style={{ color: '#a78bfa', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                        {job.status === 'done' ? 'Open Studio ➡️' : 'Track ➡️'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}
@@ -429,7 +714,7 @@ function App() {
                     {/* Portrait Video Player */}
                     <div className="player-wrapper">
                       <video 
-                        src={`${API_BASE}/${clips[selectedClipIdx].path}`} 
+                        src={clips[selectedClipIdx].path} 
                         controls 
                         className="shorts-player"
                         key={clips[selectedClipIdx].path}
@@ -452,14 +737,28 @@ function App() {
                   <div className="studio-footer">
                     <button 
                       className="btn-export"
-                      onClick={() => window.open(`${API_BASE}/${clips[selectedClipIdx].path}`)}
+                      onClick={() => handleDownloadClip(
+                        clips[selectedClipIdx].path, 
+                        clips[selectedClipIdx].start, 
+                        clips[selectedClipIdx].end
+                      )}
+                      disabled={downloading}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      Download Clip
+                      {downloading ? (
+                        <>
+                          <span className="spinner-small"></span>
+                          Downloading...
+                        </>
+                      ) : (
+                        <>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line x1="12" y1="15" x2="12" y2="3" />
+                          </svg>
+                          Download Clip
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>

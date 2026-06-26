@@ -1,17 +1,35 @@
 import os
 import uuid
 import shutil
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Header, BackgroundTasks
 from pydantic import BaseModel
 from workers.video_pipeline import process_video_task, update_job_status
+from services.supabase_client import get_supabase_client, get_supabase_service_client
 
 router = APIRouter()
+
+async def get_current_user(authorization: str = Header(...)):
+    """
+    Validates the Bearer token with Supabase and returns the user object.
+    """
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header format. Must be Bearer <token>"
+        )
+    jwt_token = authorization.split(" ")[1]
+    try:
+        supabase = get_supabase_client()
+        res = supabase.auth.get_user(jwt_token)
+        return res.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
 
 @router.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...), user = Depends(get_current_user)):
     # Validate extension
     filename = file.filename or ""
     _, ext = os.path.splitext(filename)
@@ -58,16 +76,27 @@ async def upload_video(file: UploadFile = File(...)):
             os.remove(temp_file_path)
         raise HTTPException(status_code=500, detail=f"Failed to save video: {str(e)}")
         
-    # Initialize the job status in Redis
-    update_job_status(
-        job_id=job_id,
-        status="pending",
-        step="Initializing pipeline...",
-        progress=0
-    )
+    # Initialize the job status in Supabase
+    try:
+        supabase = get_supabase_service_client()
+        supabase.table("jobs").insert({
+            "id": job_id,
+            "user_id": user.id,
+            "status": "pending",
+            "step": "Initializing pipeline...",
+            "progress": 0,
+            "clips": []
+        }).execute()
+    except Exception as e:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create job in database: {str(e)}")
     
-    # Run the pipeline in a background Celery task
-    process_video_task.delay(job_id, temp_file_path)
+    # Run the pipeline in a background task
+    if os.getenv("USE_CELERY", "false").lower() == "true":
+        process_video_task.delay(job_id, temp_file_path)
+    else:
+        background_tasks.add_task(process_video_task, job_id, temp_file_path)
     
     # Return immediately, don't wait for pipeline
     return {"job_id": job_id}
@@ -78,7 +107,7 @@ class UrlUploadRequest(BaseModel):
 
 
 @router.post("/upload-url")
-async def upload_url(request: UrlUploadRequest):
+async def upload_url(request: UrlUploadRequest, background_tasks: BackgroundTasks, user = Depends(get_current_user)):
     url = request.url
     if not url.startswith("http://") and not url.startswith("https://"):
         raise HTTPException(
@@ -88,15 +117,25 @@ async def upload_url(request: UrlUploadRequest):
         
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     
-    update_job_status(
-        job_id=job_id,
-        status="pending",
-        step="Initializing download pipeline...",
-        progress=0
-    )
+    # Initialize the job status in Supabase
+    try:
+        supabase = get_supabase_service_client()
+        supabase.table("jobs").insert({
+            "id": job_id,
+            "user_id": user.id,
+            "status": "pending",
+            "step": "Initializing download pipeline...",
+            "progress": 0,
+            "clips": []
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create job in database: {str(e)}")
     
-    # Pass the URL directly. process_video_task will download it inside the worker.
-    process_video_task.delay(job_id, url)
+    # Pass the URL directly. process_video_task will download/process it in the background.
+    if os.getenv("USE_CELERY", "false").lower() == "true":
+        process_video_task.delay(job_id, url)
+    else:
+        background_tasks.add_task(process_video_task, job_id, url)
     
     return {"job_id": job_id}
 

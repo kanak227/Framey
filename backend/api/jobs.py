@@ -1,73 +1,81 @@
 import os
 import json
-import redis
 import asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from services.supabase_client import get_supabase_service_client
 
 router = APIRouter()
 
-# Initialize Redis client
-redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-redis_client = redis.from_url(redis_url)
-
 @router.get("/status/{job_id}")
 async def get_job_status(job_id: str):
-    # Lookup the job status in Redis
+    """
+    Lookup the job status in Supabase.
+    """
     try:
-        data = redis_client.get(f"job:{job_id}")
+        supabase = get_supabase_service_client()
+        res = supabase.table("jobs").select("*").eq("id", job_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job_data = res.data[0]
+        # Return format consistent with frontend expectations
+        return {
+            "status": job_data["status"],
+            "step": job_data["step"],
+            "progress": job_data["progress"],
+            "clips": job_data["clips"],
+            "error": job_data.get("error")
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
-        
-    if not data:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    return json.loads(data)
+        raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
 
 @router.get("/status/stream/{job_id}")
 async def stream_job_status(job_id: str):
     """
-    Streams job status updates as Server-Sent Events (SSE).
+    Streams job status updates as Server-Sent Events (SSE) by querying Supabase.
     """
-    # Verify the job exists before starting the stream
     try:
-        data = redis_client.get(f"job:{job_id}")
+        supabase = get_supabase_service_client()
+        res = supabase.table("jobs").select("*").eq("id", job_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Job not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
-        
-    if not data:
-        raise HTTPException(status_code=404, detail="Job not found")
 
     async def status_generator():
-        last_data = None
+        last_data_str = None
         while True:
             try:
-                data = redis_client.get(f"job:{job_id}")
-            except Exception as e:
-                err_data = json.dumps({"status": "error", "error": f"Database connection error: {str(e)}"})
-                yield f"data: {err_data}\n\n"
-                break
-                
-            if not data:
-                err_data = json.dumps({"status": "error", "error": "Job not found"})
-                yield f"data: {err_data}\n\n"
-                break
-                
-            decoded_data = data.decode("utf-8")
-            if decoded_data != last_data:
-                yield f"data: {decoded_data}\n\n"
-                last_data = decoded_data
-                
-            try:
-                parsed_data = json.loads(decoded_data)
-                status = parsed_data.get("status")
-                if status in ("done", "failed"):
+                res = supabase.table("jobs").select("*").eq("id", job_id).execute()
+                if not res.data:
+                    err_data = json.dumps({"status": "error", "error": "Job not found"})
+                    yield f"data: {err_data}\n\n"
                     break
-            except Exception:
+                
+                job_data = res.data[0]
+                formatted_data = {
+                    "status": job_data["status"],
+                    "step": job_data["step"],
+                    "progress": job_data["progress"],
+                    "clips": job_data["clips"],
+                    "error": job_data.get("error")
+                }
+                
+                data_str = json.dumps(formatted_data)
+                if data_str != last_data_str:
+                    yield f"data: {data_str}\n\n"
+                    last_data_str = data_str
+                    
+                if job_data["status"] in ("done", "failed"):
+                    break
+            except Exception as e:
+                err_data = json.dumps({"status": "error", "error": f"Database query error: {str(e)}"})
+                yield f"data: {err_data}\n\n"
                 break
                 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.5)
 
     return StreamingResponse(status_generator(), media_type="text/event-stream")
-
-
